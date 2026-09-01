@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>DualSub Player</title>
+<!--
+  DualSub Player — custom Cast Web Receiver.
+
+  A Chromecast is a small Chrome browser. This is the page it loads when the phone casts with the
+  DualSub app id instead of Google's default receiver. It exists for two reasons the default
+  receiver cannot deliver:
+
+    1. NO CHROME. Google's receiver draws a large overlay whenever playback pauses, which sits on
+       top of the very line a learner paused to read. This page draws nothing but the video and
+       the subtitles — pausing changes nothing on screen.
+
+    2. TWO INDEPENDENT SUBTITLE TRACKS. The Cast SDK renders one text track at a time. Here both
+       slots are drawn by this page from cue data the phone sends over the Cast message channel,
+       each positioned and styled from the phone's own slot settings.
+
+  The video itself never touches the host serving this page: it still streams from the phone's
+  local HTTP server straight to the TV. Cue data arrives over the message channel rather than by
+  fetching from the phone, because this page is served over HTTPS and a fetch() to the phone's
+  plain-HTTP server would be blocked as mixed content (media playback is explicitly exempt).
+
+  Plain JavaScript on purpose: it runs on TV hardware, and it must stay small.
+-->
+<script src="https://www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
+<style>
+  html, body { margin: 0; width: 100%; height: 100%; background: #000; overflow: hidden; }
+  #video {
+    position: absolute; left: 0; top: 0; width: 100%; height: 100%;
+    object-fit: contain; background: #000;
+  }
+  .sub {
+    position: absolute; left: 4%; right: 4%;
+    text-align: center; pointer-events: none;
+    font-family: Roboto, "Noto Sans", "Droid Sans", sans-serif;
+    line-height: 1.25;
+  }
+  .sub span {
+    display: inline-block; white-space: pre-wrap; word-wrap: break-word;
+    padding: 0.08em 0.4em; border-radius: 0.18em;
+    /* stroke drawn behind the fill, as the phone's OutlineTextView does */
+    paint-order: stroke fill;
+  }
+  #hud {
+    position: absolute; left: 1.5%; top: 1.5%; padding: 0.4em 0.7em;
+    font: 2vh/1.4 monospace; color: #9fd; background: rgba(0,0,0,0.6);
+    border-radius: 0.3em; white-space: pre; display: none; pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<video id="video"></video>
+<div id="subB" class="sub"><span></span></div>
+<div id="subA" class="sub"><span></span></div>
+<div id="hud"></div>
+
+<script>
+(function () {
+  'use strict';
+
+  var NS = 'urn:x-cast:com.dualsub.player';
+
+  // ---- state -----------------------------------------------------------------------------
+  // One entry per slot. cues: [[startMs, endMs, text], ...] sorted by start.
+  var slots = {
+    a: { cues: [], pending: [], delay: 0, show: true, style: null, el: null, lastText: null },
+    b: { cues: [], pending: [], delay: 0, show: true, style: null, el: null, lastText: null }
+  };
+  slots.a.el = document.getElementById('subA');
+  slots.b.el = document.getElementById('subB');
+  var video = document.getElementById('video');
+  var hud = document.getElementById('hud');
+  var debug = false;
+  var lastMsg = '';
+  var scale = 1.4;
+
+  // Slot defaults mirror Prefs.loadStyle on the phone; the phone overrides them on connect.
+  applyStyle('a', { top: false, size: 24, color: '#FFFFFF', outline: true, bold: true, bgAlpha: 96, voff: 3 });
+  applyStyle('b', { top: true,  size: 20, color: '#FFE082', outline: true, bold: true, bgAlpha: 96, voff: 3 });
+
+  // ---- styling ---------------------------------------------------------------------------
+  function applyStyle(id, st) {
+    var s = slots[id];
+    s.style = st;
+    var el = s.el, span = el.firstElementChild;
+    // Phone sizes are sp on a ~640dp-tall screen; a TV is watched from further away, so the
+    // same nominal size is scaled up. 24 sp -> ~5.3% of screen height at scale 1.4.
+    var vh = (st.size / 640) * 100 * scale;
+    el.style.fontSize = vh + 'vh';
+    el.style.top = st.top ? st.voff + '%' : '';
+    el.style.bottom = st.top ? '' : st.voff + '%';
+    span.style.color = st.color;
+    span.style.fontWeight = st.bold ? '700' : '400';
+    span.style.backgroundColor = 'rgba(0,0,0,' + (Math.max(0, Math.min(255, st.bgAlpha)) / 255) + ')';
+    if (st.outline) {
+      // The phone strokes at size/9 sp, i.e. about 11% of the glyph height, whatever the size.
+      span.style.webkitTextStroke = '0.11em #000';
+      span.style.textShadow = '0 0 0.12em #000, 0 0 0.12em #000';
+    } else {
+      span.style.webkitTextStroke = '';
+      span.style.textShadow = '0 0 0.12em rgba(0,0,0,0.9)';
+    }
+    s.lastText = null;   // force repaint
+  }
+
+  // ---- cue lookup: the same rule as the phone's 100 ms tick ----------------------------------
+  function textAt(id, tMs) {
+    var s = slots[id];
+    if (!s.show) return '';
+    var p = tMs - s.delay, out = '', cues = s.cues;
+    for (var i = 0; i < cues.length; i++) {
+      var c = cues[i];
+      if (c[0] > p) break;
+      if (p < c[1]) out = out ? out + '\n' + c[2] : c[2];
+    }
+    return out;
+  }
+
+  function render() {
+    var t = video.currentTime * 1000;
+    for (var id in slots) {
+      var s = slots[id], txt = textAt(id, t);
+      if (txt !== s.lastText) {
+        s.lastText = txt;
+        s.el.firstElementChild.textContent = txt;
+        s.el.style.visibility = txt ? 'visible' : 'hidden';
+      }
+    }
+    if (debug) {
+      hud.textContent = 'pos ' + (t / 1000).toFixed(1) + 's  ' + (video.paused ? 'paused' : 'playing')
+        + '\nA ' + slots.a.cues.length + ' cues  delay ' + slots.a.delay + '  show ' + slots.a.show
+        + '\nB ' + slots.b.cues.length + ' cues  delay ' + slots.b.delay + '  show ' + slots.b.show
+        + '\nlast: ' + lastMsg;
+    }
+  }
+  setInterval(render, 100);
+
+  // ---- message channel ---------------------------------------------------------------------
+  // Cue lists can exceed the 64 KB message limit, so the phone sends them in numbered chunks:
+  //   {t:"cues", s:"a"|"b", i:<index>, n:<count>, c:[[start,end,text],...]}
+  // Chunk 0 starts a fresh list; the last chunk commits it, so a half-received list is never
+  // drawn.
+  function onMessage(ev) {
+    var m = ev.data;
+    if (!m || !m.t) return;
+    lastMsg = m.t + (m.s ? ' ' + m.s : '') + (m.i !== undefined ? ' ' + m.i + '/' + m.n : '');
+    var s;
+    switch (m.t) {
+      case 'style':
+        if (m.scale) scale = m.scale;
+        if (m.a) applyStyle('a', m.a);
+        if (m.b) applyStyle('b', m.b);
+        break;
+      case 'cues':
+        s = slots[m.s]; if (!s) return;
+        if (m.i === 0) s.pending = [];
+        if (m.c && m.c.length) s.pending = s.pending.concat(m.c);
+        if (m.i === m.n - 1) {
+          s.pending.sort(function (x, y) { return x[0] - y[0]; });
+          s.cues = s.pending; s.pending = []; s.lastText = null;
+        }
+        break;
+      case 'delay':
+        if (typeof m.a === 'number') slots.a.delay = m.a;
+        if (typeof m.b === 'number') slots.b.delay = m.b;
+        slots.a.lastText = slots.b.lastText = null;
+        break;
+      case 'show':
+        if (typeof m.a === 'boolean') slots.a.show = m.a;
+        if (typeof m.b === 'boolean') slots.b.show = m.b;
+        slots.a.lastText = slots.b.lastText = null;
+        break;
+      case 'clear':
+        slots.a.cues = []; slots.b.cues = []; slots.a.pending = []; slots.b.pending = [];
+        slots.a.lastText = slots.b.lastText = null;
+        break;
+      case 'debug':
+        debug = !!m.on; hud.style.display = debug ? 'block' : 'none';
+        break;
+    }
+    render();
+  }
+
+  // ---- Cast framework ----------------------------------------------------------------------
+  var context = cast.framework.CastReceiverContext.getInstance();
+  var playerManager = context.getPlayerManager();
+  // No <cast-media-player>: the framework drives this bare <video>, and nothing else is ever
+  // drawn on top of it. That is the entire point of this receiver.
+  playerManager.setMediaElement(video);
+  context.addCustomMessageListener(NS, onMessage);
+
+  playerManager.addEventListener(cast.framework.events.EventType.PLAYER_LOAD_COMPLETE, function () {
+    // Tell the phone we are here; it answers with style, cues and delays.
+    context.sendCustomMessage(NS, undefined, { t: 'ready' });
+  });
+
+  context.start({
+    // Learners pause for long stretches to read; do not let a quiet sender look like a dead one.
+    maxInactivity: 60
+  });
+})();
+</script>
+</body>
+</html>
