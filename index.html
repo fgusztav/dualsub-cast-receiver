@@ -41,8 +41,11 @@
   .sub span {
     display: inline-block; white-space: pre-wrap; word-wrap: break-word;
     padding: 0.08em 0.4em; border-radius: 0.18em;
-    /* stroke drawn behind the fill, as the phone's OutlineTextView does */
-    paint-order: stroke fill;
+    /* No text stroke. The phone draws its outline behind the fill, but Chromecast's Chromium
+       predates paint-order on HTML text, so a stroke is centred on the glyph edge and eats
+       half its width into the letters - hollow, unreadable at TV sizes. A faint shadow keeps
+       light text legible on bright frames; the translucent box does the rest. */
+    text-shadow: 0 0 0.12em rgba(0,0,0,0.9);
   }
   #hud {
     position: absolute; left: 1.5%; top: 1.5%; padding: 0.4em 0.7em;
@@ -95,14 +98,7 @@
     span.style.color = st.color;
     span.style.fontWeight = st.bold ? '700' : '400';
     span.style.backgroundColor = 'rgba(0,0,0,' + (Math.max(0, Math.min(255, st.bgAlpha)) / 255) + ')';
-    if (st.outline) {
-      // The phone strokes at size/9 sp, i.e. about 11% of the glyph height, whatever the size.
-      span.style.webkitTextStroke = '0.11em #000';
-      span.style.textShadow = '0 0 0.12em #000, 0 0 0.12em #000';
-    } else {
-      span.style.webkitTextStroke = '';
-      span.style.textShadow = '0 0 0.12em rgba(0,0,0,0.9)';
-    }
+    // st.outline is deliberately not applied: see the .sub span rule.
     s.lastText = null;   // force repaint
   }
 
