@@ -127,6 +127,7 @@
     }
     if (debug) {
       hud.textContent = 'pos ' + (t / 1000).toFixed(1) + 's  ' + (video.paused ? 'paused' : 'playing')
+        + '  rate ' + video.playbackRate
         + '\nA ' + slots.a.cues.length + ' cues  delay ' + slots.a.delay + '  show ' + slots.a.show
         + '\nB ' + slots.b.cues.length + ' cues  delay ' + slots.b.delay + '  show ' + slots.b.show
         + '\nlast: ' + lastMsg;
@@ -175,6 +176,13 @@
         break;
       case 'debug':
         debug = !!m.on; hud.style.display = debug ? 'block' : 'none';
+        break;
+      case 'rate':
+        // Also arrives as a media-channel command the framework applies itself; this copy makes
+        // sure the two sides agree even if that one was missed.
+        if (typeof m.v === 'number' && m.v > 0) {
+          try { playerManager.setPlaybackRate(m.v); } catch (e) { video.playbackRate = m.v; }
+        }
         break;
     }
     render();
